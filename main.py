@@ -60,12 +60,18 @@ def run_flask():
     app.run(host='0.0.0.0', port=port)
 
 # --- BOT CONFIG ---
-TOKEN = "7891440763:AAEcQNKFr7DIzAufHeKDZ1H9UJbQ4FsAl2A"
+# NAYA TOKEN YAHAN HAI
+TOKEN = "7891440763:AAEAP5UpVeGCNLzkY07OGH8Svz64-QVZDnI"
 ADMIN_ID = 5766303284 
 RENDER_URL = "https://earncashadda.onrender.com" 
 
 bot = Bot(token=TOKEN, parse_mode="HTML")
 dp = Dispatcher(bot, storage=MemoryStorage())
+
+class AdminStates(StatesGroup):
+    broadcast = State()
+    withdraw_upi = State()
+    redeem_code = State()
 
 db = sqlite3.connect("cashadda.db")
 sql = db.cursor()
@@ -88,21 +94,19 @@ async def send_main_menu(chat_id):
         InlineKeyboardButton("🏆 Leaderboard", callback_data="leader"),
         InlineKeyboardButton("🎁 Gift Code", callback_data="redeem")
     )
-    await bot.send_message(chat_id, "👋 <b>CashAdda Dashboard Loaded!</b>\n\nStart earning now by inviting friends. Every referral gives you 3 Rs! 💸", reply_markup=markup)
+    await bot.send_message(chat_id, "👋 <b>CashAdda Dashboard</b>\n\nVerified Successfully! 💸", reply_markup=markup)
 
-# --- START ---
 @dp.message_handler(commands=['start'])
 async def start(message: types.Message):
     u_id = message.from_user.id
     u_ip = await get_ip()
 
-    sql.execute("SELECT is_verified FROM users WHERE user_id = ?", (u_id,))
-    res = sql.fetchone()
-
-    # One Device Security Check
     sql.execute("SELECT user_id FROM users WHERE ip = ? AND user_id != ?", (u_ip, u_id))
     if sql.fetchone():
-        return await message.answer("❌ <b>Security Alert!</b>\nYou already have an account on this device.")
+        return await message.answer("❌ <b>Security Alert!</b> Duplicate account detected.")
+
+    sql.execute("SELECT is_verified FROM users WHERE user_id = ?", (u_id,))
+    res = sql.fetchone()
 
     if not res or res[0] == 0:
         if not res:
@@ -111,16 +115,13 @@ async def start(message: types.Message):
             sql.execute("INSERT INTO users (user_id, ip, referred_by) VALUES (?, ?, ?)", (u_id, u_ip, ref))
             db.commit()
         
-        # Backup button added
         markup = InlineKeyboardMarkup(row_width=1)
-        markup.add(InlineKeyboardButton("🛡️ Click to Verify", web_app=types.WebAppInfo(url=f"{RENDER_URL}/verify")))
-        markup.add(InlineKeyboardButton("✅ I'm Verified - Open Menu", callback_data="check_verified"))
-        
-        return await message.answer("🔒 <b>Device Verification Required</b>\n\n1. Click Verify below.\n2. Complete the scan.\n3. Dashboard will open automatically!", reply_markup=markup)
+        markup.add(InlineKeyboardButton("🛡️ Verify Device", web_app=types.WebAppInfo(url=f"{RENDER_URL}/verify")))
+        markup.add(InlineKeyboardButton("✅ Open Menu", callback_data="check_verified"))
+        return await message.answer("🔒 <b>Verification Required</b>", reply_markup=markup)
 
     await send_main_menu(u_id)
 
-# --- WEBAPP DATA LISTENER ---
 @dp.message_handler(content_types=['web_app_data'])
 async def handle_verified(message: types.Message):
     if message.web_app_data.data == "verified":
@@ -128,7 +129,6 @@ async def handle_verified(message: types.Message):
         sql.execute("UPDATE users SET is_verified = 1, balance = balance + 3, is_claimed = 1 WHERE user_id = ? AND is_claimed = 0", (u_id,))
         db.commit()
         
-        # Give referral bonus if exists
         sql.execute("SELECT referred_by FROM users WHERE user_id = ?", (u_id,))
         ref = sql.fetchone()[0]
         if ref:
@@ -137,25 +137,23 @@ async def handle_verified(message: types.Message):
             except: pass
             db.commit()
 
-        await message.answer("✅ <b>Verification Success!</b> 3 Rs Joining Bonus Added.")
+        await message.answer("✅ <b>Verified!</b> 3 Rs Bonus Added.")
         await send_main_menu(u_id)
 
-# --- CALLBACKS ---
 @dp.callback_query_handler(lambda c: True)
 async def calls(c: types.CallbackQuery):
     u_id = c.from_user.id
     if c.data == "check_verified":
         sql.execute("SELECT is_verified FROM users WHERE user_id = ?", (u_id,))
         res = sql.fetchone()
-        if res and res[0] == 1:
-            await send_main_menu(u_id)
-        else:
-            await bot.answer_callback_query(c.id, "❌ Please verify first!", show_alert=True)
-    
+        if res and res[0] == 1: await send_main_menu(u_id)
+        else: await bot.answer_callback_query(c.id, "❌ Verify first!", show_alert=True)
     elif c.data == "bal":
         sql.execute("SELECT balance FROM users WHERE user_id = ?", (u_id,))
-        await bot.send_message(u_id, f"💳 <b>Current Balance:</b> {sql.fetchone()[0]} Rs")
+        await bot.send_message(u_id, f"💳 <b>Balance:</b> {sql.fetchone()[0]} Rs")
 
 if __name__ == '__main__':
+    # Flask thread start
     threading.Thread(target=run_flask, daemon=True).start()
+    # Conflict Error fix: skip_updates=True
     executor.start_polling(dp, skip_updates=True)
