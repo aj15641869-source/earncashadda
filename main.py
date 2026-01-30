@@ -10,14 +10,16 @@ from aiogram.dispatcher import FSMContext
 from aiogram.dispatcher.filters.state import State, StatesGroup
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
 
-# --- KOYEB PORT JUGAD ---
+# --- RENDER/KOYEB PORT JUGAD ---
 app = Flask(__name__)
 @app.route('/')
 def health_check():
     return "Bot is Running!"
 
 def run_flask():
-    app.run(host='0.0.0.0', port=8000)
+    # Render uses 'PORT' environment variable automatically
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host='0.0.0.0', port=port)
 
 # --- CONFIG ---
 TOKEN = "7891440763:AAEcQNKFr7DIzAufHeKDZ1H9UJbQ4FsAl2A"
@@ -74,18 +76,18 @@ async def start(message: types.Message):
         for name, link in CHANNEL_LINKS:
             markup.add(InlineKeyboardButton(name, url=link))
         markup.add(InlineKeyboardButton("✅ Joined - Verify", callback_data="verify"))
-        return await message.answer("❌ <b>Access Denied!</b>\n\nJoin BOTH channels to unlock your bonus:", reply_markup=markup)
+        return await message.answer("❌ <b>Access Denied!</b>\n\nJoin BOTH channels:", reply_markup=markup)
 
     sql.execute("SELECT is_bonus_claimed, referred_by FROM users WHERE user_id = ?", (user_id,))
     res = sql.fetchone()
-    if res[0] == 0: 
+    if res and res[0] == 0: 
         sql.execute("UPDATE users SET balance = balance + ?, is_bonus_claimed = 1 WHERE user_id = ?", (JOINING_BONUS, user_id))
         if res[1]:
             sql.execute("UPDATE users SET balance = balance + ?, ref_count = ref_count + 1 WHERE user_id = ?", (REFER_BONUS, res[1]))
             try: await bot.send_message(res[1], "💰 <b>Referral Success!</b> +3 Rs")
             except: pass
         db.commit()
-        await message.answer(f"🎉 <b>Congratulations!</b> You received {JOINING_BONUS} Rs Bonus!")
+        await message.answer(f"🎉 Bonus Added!")
 
     markup = InlineKeyboardMarkup(row_width=2)
     markup.add(
@@ -94,7 +96,7 @@ async def start(message: types.Message):
         InlineKeyboardButton("📤 Withdraw", callback_data="withdraw"),
         InlineKeyboardButton("🏆 Leaderboard", callback_data="leaderboard")
     )
-    await message.answer(f"👋 Welcome {message.from_user.first_name}!", reply_markup=markup)
+    await message.answer(f"👋 Welcome!", reply_markup=markup)
 
 @dp.callback_query_handler(lambda c: True)
 async def all_callbacks(c: types.CallbackQuery):
@@ -103,15 +105,13 @@ async def all_callbacks(c: types.CallbackQuery):
         if await is_subscribed(user_id):
             await c.message.delete()
             await start(c.message)
-        else:
-            await bot.answer_callback_query(c.id, "❌ Join BOTH channels first!", show_alert=True)
     elif c.data == "balance":
         sql.execute("SELECT balance, ref_count FROM users WHERE user_id = ?", (user_id,))
         res = sql.fetchone()
-        await bot.send_message(user_id, f"💳 <b>Balance:</b> {res[0]} Rs\n👥 <b>Total Refers:</b> {res[1]}")
+        await bot.send_message(user_id, f"💳 Balance: {res[0]} Rs")
     elif c.data == "refer":
         me = await bot.get_me()
-        await bot.send_message(user_id, f"👥 <b>Refer & Earn</b>\n\nLink: https://t.me/{me.username}?start={user_id}")
+        await bot.send_message(user_id, f"🔗 Link: https://t.me/{me.username}?start={user_id}")
 
 if __name__ == '__main__':
     threading.Thread(target=run_flask).start()
