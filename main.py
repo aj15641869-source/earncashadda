@@ -1,6 +1,8 @@
 import sqlite3
 import os
 import aiohttp
+import threading
+from flask import Flask
 from aiogram import Bot, Dispatcher, types
 from aiogram.utils import executor
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
@@ -8,32 +10,31 @@ from aiogram.dispatcher import FSMContext
 from aiogram.dispatcher.filters.state import State, StatesGroup
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
 
+# --- KOYEB PORT JUGAD ---
+app = Flask(__name__)
+@app.route('/')
+def health_check():
+    return "Bot is Running!"
+
+def run_flask():
+    app.run(host='0.0.0.0', port=8000)
+
 # --- CONFIG ---
 TOKEN = "7891440763:AAEcQNKFr7DIzAufHeKDZ1H9UJbQ4FsAl2A"
-ADMIN_ID = 5766303284
+ADMIN_ID = 5766303284 
 REFER_BONUS = 3  
 JOINING_BONUS = 3 
 MIN_WITHDRAW = 10
 
-# Yahan dono dalo: Private ID aur Public Username
-CHANNELS = [-1001963038072, "@SheinVoucher4000"] 
-# Buttons ke liye links
+CHANNELS = [-1001963038072, "@Sheinvoucher4000"] 
 CHANNEL_LINKS = [
     ("📢 Private Channel", "https://t.me/+FsXUwNLm67sxYmE1"),
-    ("📢 Public Channel", "https://t.me/SheinVoucher4000")
+    ("📢 Public Channel", "https://t.me/Sheinvoucher4000")
 ]
-
-# Gateway Setup (Optional)
-GATEWAY_API_URL = "https://your-gateway.com/api"
-GATEWAY_KEY = "YOUR_API_KEY"
 
 bot = Bot(token=TOKEN, parse_mode="HTML")
 storage = MemoryStorage()
 dp = Dispatcher(bot, storage=storage)
-
-# --- STATES FOR WITHDRAW ---
-class WithdrawState(StatesGroup):
-    waiting_for_upi = State()
 
 # --- DATABASE SETUP ---
 db = sqlite3.connect("cashadda.db")
@@ -73,19 +74,18 @@ async def start(message: types.Message):
         for name, link in CHANNEL_LINKS:
             markup.add(InlineKeyboardButton(name, url=link))
         markup.add(InlineKeyboardButton("✅ Joined - Verify", callback_data="verify"))
-        return await message.answer("❌ <b>Access Denied!</b>\n\nJoin <b>BOTH</b> channels to unlock your bonus:", reply_markup=markup)
+        return await message.answer("❌ <b>Access Denied!</b>\n\nJoin BOTH channels to unlock your bonus:", reply_markup=markup)
 
-    # Claim Joining Bonus
     sql.execute("SELECT is_bonus_claimed, referred_by FROM users WHERE user_id = ?", (user_id,))
     res = sql.fetchone()
     if res[0] == 0: 
         sql.execute("UPDATE users SET balance = balance + ?, is_bonus_claimed = 1 WHERE user_id = ?", (JOINING_BONUS, user_id))
         if res[1]:
             sql.execute("UPDATE users SET balance = balance + ?, ref_count = ref_count + 1 WHERE user_id = ?", (REFER_BONUS, res[1]))
-            try: await bot.send_message(res[1], "💰 <b>Referral Success!</b> You earned 3 Rs.")
+            try: await bot.send_message(res[1], "💰 <b>Referral Success!</b> +3 Rs")
             except: pass
         db.commit()
-        await message.answer(f"🎉 <b>Congratulations!</b> You received {JOINING_BONUS} Rs Joining Bonus!")
+        await message.answer(f"🎉 <b>Congratulations!</b> You received {JOINING_BONUS} Rs Bonus!")
 
     markup = InlineKeyboardMarkup(row_width=2)
     markup.add(
@@ -96,14 +96,23 @@ async def start(message: types.Message):
     )
     await message.answer(f"👋 Welcome {message.from_user.first_name}!", reply_markup=markup)
 
-# --- WITHDRAWAL PROCESS ---
-@dp.callback_query_handler(lambda c: c.data == "withdraw")
-async def withdraw_init(c: types.CallbackQuery):
+@dp.callback_query_handler(lambda c: True)
+async def all_callbacks(c: types.CallbackQuery):
     user_id = c.from_user.id
-    sql.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,))
-    balance = sql.fetchone()[0]
-    
-    if balance < MIN_WITHDRAW:
-        return await bot.answer_callback_query(c.id, f"❌ Min withdraw is {MIN_WITHDRAW} Rs!", show_alert=True)
-    
-    await
+    if c.data == "verify":
+        if await is_subscribed(user_id):
+            await c.message.delete()
+            await start(c.message)
+        else:
+            await bot.answer_callback_query(c.id, "❌ Join BOTH channels first!", show_alert=True)
+    elif c.data == "balance":
+        sql.execute("SELECT balance, ref_count FROM users WHERE user_id = ?", (user_id,))
+        res = sql.fetchone()
+        await bot.send_message(user_id, f"💳 <b>Balance:</b> {res[0]} Rs\n👥 <b>Total Refers:</b> {res[1]}")
+    elif c.data == "refer":
+        me = await bot.get_me()
+        await bot.send_message(user_id, f"👥 <b>Refer & Earn</b>\n\nLink: https://t.me/{me.username}?start={user_id}")
+
+if __name__ == '__main__':
+    threading.Thread(target=run_flask).start()
+    executor.start_polling(dp, skip_updates=True)
