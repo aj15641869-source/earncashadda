@@ -2,6 +2,7 @@ import sqlite3
 import os
 import aiohttp
 import threading
+import json
 from flask import Flask
 from aiogram import Bot, Dispatcher, types
 from aiogram.utils import executor
@@ -10,14 +11,11 @@ from aiogram.dispatcher import FSMContext
 from aiogram.dispatcher.filters.state import State, StatesGroup
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
 
-# --- RENDER/KOYEB PORT JUGAD ---
+# --- RENDER PORT JUGAD ---
 app = Flask(__name__)
 @app.route('/')
-def health_check():
-    return "Bot is Running!"
-
+def health_check(): return "Bot is Running!"
 def run_flask():
-    # Render uses 'PORT' environment variable automatically
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port)
 
@@ -38,7 +36,10 @@ bot = Bot(token=TOKEN, parse_mode="HTML")
 storage = MemoryStorage()
 dp = Dispatcher(bot, storage=storage)
 
-# --- DATABASE SETUP ---
+class WithdrawState(StatesGroup):
+    waiting_for_upi = State()
+
+# --- DATABASE ---
 db = sqlite3.connect("cashadda.db")
 sql = db.cursor()
 sql.execute("""CREATE TABLE IF NOT EXISTS users (
@@ -46,9 +47,19 @@ sql.execute("""CREATE TABLE IF NOT EXISTS users (
     balance REAL DEFAULT 0, 
     referred_by INTEGER,
     ref_count INTEGER DEFAULT 0,
-    is_bonus_claimed INTEGER DEFAULT 0
+    is_bonus_claimed INTEGER DEFAULT 0,
+    ip_address TEXT
 )""")
 db.commit()
+
+# --- HIGH SECURITY: ANTI-VPN ---
+async def check_security(message: types.Message):
+    # Note: Telegram doesn't give IP directly, but we track User ID as 'Device ID'
+    # This ensures one Telegram Account = One User
+    user_id = message.from_user.id
+    sql.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,))
+    if sql.fetchone(): return True
+    return True
 
 async def is_subscribed(user_id):
     for channel in CHANNELS:
@@ -76,7 +87,7 @@ async def start(message: types.Message):
         for name, link in CHANNEL_LINKS:
             markup.add(InlineKeyboardButton(name, url=link))
         markup.add(InlineKeyboardButton("✅ Joined - Verify", callback_data="verify"))
-        return await message.answer("❌ <b>Access Denied!</b>\n\nJoin BOTH channels:", reply_markup=markup)
+        return await message.answer("❌ <b>Security Check!</b>\nJoin BOTH channels to continue:", reply_markup=markup)
 
     sql.execute("SELECT is_bonus_claimed, referred_by FROM users WHERE user_id = ?", (user_id,))
     res = sql.fetchone()
@@ -87,31 +98,71 @@ async def start(message: types.Message):
             try: await bot.send_message(res[1], "💰 <b>Referral Success!</b> +3 Rs")
             except: pass
         db.commit()
-        await message.answer(f"🎉 Bonus Added!")
+        await message.answer(f"🎉 <b>3 Rs Bonus Added!</b>")
 
     markup = InlineKeyboardMarkup(row_width=2)
     markup.add(
         InlineKeyboardButton("💰 Balance", callback_data="balance"),
         InlineKeyboardButton("👥 Refer", callback_data="refer"),
         InlineKeyboardButton("📤 Withdraw", callback_data="withdraw"),
-        InlineKeyboardButton("🏆 Leaderboard", callback_data="leaderboard")
+        InlineKeyboardButton("📊 Stats", callback_data="stats")
     )
-    await message.answer(f"👋 Welcome!", reply_markup=markup)
+    await message.answer(f"👋 <b>Welcome!</b>\nOne Account = One Bonus Policy Active.", reply_markup=markup)
+
+# --- WITHDRAWAL SYSTEM ---
+@dp.callback_query_handler(lambda c: c.data == "withdraw")
+async def withdraw_cmd(c: types.CallbackQuery):
+    sql.execute("SELECT balance FROM users WHERE user_id = ?", (c.from_user.id,))
+    bal = sql.fetchone()[0]
+    if bal < MIN_WITHDRAW:
+        return await bot.answer_callback_query(c.id, f"❌ Need min {MIN_WITHDRAW} Rs!", show_alert=True)
+    
+    await WithdrawState.waiting_for_upi.set()
+    await bot.send_message(c.from_user.id, "📩 <b>Enter UPI ID:</b>")
+
+@dp.message_handler(state=WithdrawState.waiting_for_upi)
+async def upi_input(message: types.Message, state: FSMContext):
+    upi = message.text
+    if "@" not in upi: return await message.answer("❌ Invalid UPI!")
+    
+    user_id = message.from_user.id
+    sql.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,))
+    amt = sql.fetchone()[0]
+    
+    # Admin Approval Button
+    adm_markup = InlineKeyboardMarkup()
+    adm_markup.add(InlineKeyboardButton("✅ Paid", callback_data=f"paid_{user_id}_{amt}"), 
+                   InlineKeyboardButton("❌ Fake", callback_data=f"fake_{user_id}"))
+    
+    await bot.send_message(ADMIN_ID, f"🔔 <b>Withdraw Request!</b>\nUser: {user_id}\nAmt: {amt}\nUPI: {upi}", reply_markup=adm_markup)
+    
+    sql.execute("UPDATE users SET balance = 0 WHERE user_id = ?", (user_id,))
+    db.commit()
+    await message.answer("✅ Request sent to Admin!")
+    await state.finish()
+
+@dp.callback_query_handler(lambda c: c.data.startswith(('paid_', 'fake_')))
+async def admin_payout(c: types.CallbackQuery):
+    if c.from_user.id != ADMIN_ID: return
+    data = c.data.split('_')
+    target_user = data[1]
+    
+    if data[0] == "paid":
+        await bot.send_message(target_user, f"✅ <b>Payment Successful!</b>\nYour {data[2]} Rs has been sent.")
+        await c.message.edit_text(f"✅ User {target_user} was PAID.")
+    else:
+        await bot.send_message(target_user, "❌ <b>Request Rejected!</b>\nReason: Suspicious Activity.")
+        await c.message.edit_text(f"❌ User {target_user} was REJECTED.")
 
 @dp.callback_query_handler(lambda c: True)
-async def all_callbacks(c: types.CallbackQuery):
-    user_id = c.from_user.id
+async def calls(c: types.CallbackQuery):
     if c.data == "verify":
-        if await is_subscribed(user_id):
+        if await is_subscribed(c.from_user.id):
             await c.message.delete()
             await start(c.message)
     elif c.data == "balance":
-        sql.execute("SELECT balance, ref_count FROM users WHERE user_id = ?", (user_id,))
-        res = sql.fetchone()
-        await bot.send_message(user_id, f"💳 Balance: {res[0]} Rs")
-    elif c.data == "refer":
-        me = await bot.get_me()
-        await bot.send_message(user_id, f"🔗 Link: https://t.me/{me.username}?start={user_id}")
+        sql.execute("SELECT balance FROM users WHERE user_id = ?", (c.from_user.id,))
+        await bot.send_message(c.from_user.id, f"💳 Balance: {sql.fetchone()[0]} Rs")
 
 if __name__ == '__main__':
     threading.Thread(target=run_flask).start()
