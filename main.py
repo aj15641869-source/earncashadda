@@ -41,7 +41,7 @@ HTML_CONTENT = """
             p += 5; document.getElementById('f').style.width = p + "%";
             if(p >= 100) { 
                 clearInterval(it); 
-                tg.sendData("verified"); // Bot ko signal bhej raha hai
+                tg.sendData("verified"); // Signal sent to bot
                 setTimeout(() => tg.close(), 500); 
             }
         }, 80);
@@ -69,19 +69,13 @@ dp = Dispatcher(bot, storage=MemoryStorage())
 
 class AdminStates(StatesGroup):
     broadcast = State()
-    add_bal_id = State()
-    add_bal_amt = State()
     withdraw_upi = State()
     redeem_code = State()
-    gift_code = State()
-    gift_amt = State()
 
 db = sqlite3.connect("cashadda.db")
 sql = db.cursor()
 sql.execute("CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, balance REAL DEFAULT 0, ip TEXT, is_verified INTEGER DEFAULT 0, referred_by INTEGER, ref_count INTEGER DEFAULT 0, is_claimed INTEGER DEFAULT 0)")
-sql.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
 sql.execute("CREATE TABLE IF NOT EXISTS giftcodes (code TEXT PRIMARY KEY, amount REAL, uses INTEGER)")
-sql.execute("INSERT OR IGNORE INTO settings VALUES ('min_withdraw', '10')")
 db.commit()
 
 async def get_ip():
@@ -91,7 +85,7 @@ async def get_ip():
                 d = await r.json(); return d['ip']
     except: return "127.0.0.1"
 
-# Dashboard Function (Baar baar use hoga)
+# Main Dashboard Helper
 async def send_main_menu(chat_id):
     markup = InlineKeyboardMarkup(row_width=2)
     markup.add(
@@ -101,7 +95,7 @@ async def send_main_menu(chat_id):
         InlineKeyboardButton("🏆 Leaderboard", callback_data="leader"),
         InlineKeyboardButton("🎁 Gift Code", callback_data="redeem")
     )
-    await bot.send_message(chat_id, "👋 <b>Welcome To CashAdda!</b>\nYour account is fully verified ✅", reply_markup=markup)
+    await bot.send_message(chat_id, "👋 <b>Verification Successful!</b>\n\nWelcome to your earning dashboard. Start inviting friends to earn real cash! 💸", reply_markup=markup)
 
 # --- START ---
 @dp.message_handler(commands=['start'])
@@ -109,13 +103,13 @@ async def start(message: types.Message):
     u_id = message.from_user.id
     u_ip = await get_ip()
 
-    sql.execute("SELECT is_verified FROM users WHERE user_id = ?", (u_id,))
-    res = sql.fetchone()
-
-    # Pehle IP Check
+    # One Device Lock check
     sql.execute("SELECT user_id FROM users WHERE ip = ? AND user_id != ?", (u_ip, u_id))
     if sql.fetchone():
-        return await message.answer("❌ One Device = One Account Policy!")
+        return await message.answer("❌ <b>Security Alert!</b> Duplicate account detected on this device.")
+
+    sql.execute("SELECT is_verified FROM users WHERE user_id = ?", (u_id,))
+    res = sql.fetchone()
 
     if not res or res[0] == 0:
         if not res:
@@ -125,13 +119,13 @@ async def start(message: types.Message):
             db.commit()
         
         markup = InlineKeyboardMarkup().add(InlineKeyboardButton("🛡️ Verify Device", web_app=types.WebAppInfo(url=f"{RENDER_URL}/verify")))
-        return await message.answer("🔒 <b>Security Verification</b>\nClick below to verify and unlock the dashboard.", reply_markup=markup)
+        return await message.answer("🔒 <b>Hardware Verification Required</b>\nClick below to scan your device integrity and start earning.", reply_markup=markup)
 
     await send_main_menu(u_id)
 
-# --- VERIFY SUCCESS (Yahan Fix kiya hai) ---
+# --- WEBAPP DATA HANDLER (VERIFY FIX) ---
 @dp.message_handler(content_types=['web_app_data'])
-async def verified_data(message: types.Message):
+async def webapp_verified(message: types.Message):
     if message.web_app_data.data == "verified":
         u_id = message.from_user.id
         sql.execute("SELECT is_claimed, referred_by FROM users WHERE user_id = ?", (u_id,))
@@ -140,51 +134,25 @@ async def verified_data(message: types.Message):
         # 3 Rs Joining Bonus + Mark Verified
         if res and res[0] == 0:
             sql.execute("UPDATE users SET balance = balance + 3, is_verified = 1, is_claimed = 1 WHERE user_id = ?", (u_id,))
-            if res[1]: # Referrer Bonus
+            if res[1]: # Referral Bonus
                 sql.execute("UPDATE users SET balance = balance + 3, ref_count = ref_count + 1 WHERE user_id = ?", (res[1],))
-                try: await bot.send_message(res[1], "💰 <b>Referral Success!</b> +3 Rs added.")
+                try: await bot.send_message(res[1], "💰 <b>Referral Success!</b> Your friend verified. +3 Rs added!")
                 except: pass
             db.commit()
         
-        await message.answer("✅ <b>Verified Successfully!</b>\n3 Rs Bonus Added to your balance.")
-        await send_main_menu(u_id) # Seedha menu bhej diya
+        # Immediate Dashboard after verification
+        await send_main_menu(u_id)
 
-# --- ADMIN & OTHERS ---
-@dp.message_handler(commands=['admin'])
-async def admin(message: types.Message):
-    if message.from_user.id == ADMIN_ID:
-        markup = InlineKeyboardMarkup().add(
-            InlineKeyboardButton("📢 Broadcast", callback_data="bc"),
-            InlineKeyboardButton("🎁 Make Giftcode", callback_data="mk_gift")
-        )
-        await message.answer("👨‍✈️ Admin Panel", reply_markup=markup)
-
+# --- CALLBACKS & OTHERS ---
 @dp.callback_query_handler(lambda c: True, state="*")
-async def calls(c: types.CallbackQuery, state: FSMContext):
+async def process_calls(c: types.CallbackQuery, state: FSMContext):
     u_id = c.from_user.id
     if c.data == "bal":
         sql.execute("SELECT balance FROM users WHERE user_id = ?", (u_id,))
-        await bot.send_message(u_id, f"💳 <b>Balance:</b> {sql.fetchone()[0]} Rs")
+        await bot.send_message(u_id, f"💳 <b>Current Balance:</b> {sql.fetchone()[0]} Rs")
     elif c.data == "ref":
         me = await bot.get_me()
-        await bot.send_message(u_id, f"👥 <b>Refer Link:</b> https://t.me/{me.username}?start={u_id}")
-    elif c.data == "redeem":
-        await AdminStates.redeem_code.set()
-        await bot.send_message(u_id, "📩 Enter Gift Code:")
-
-# Giftcode Redeem Handler
-@dp.message_handler(state=AdminStates.redeem_code)
-async def gift_redeem(message: types.Message, state: FSMContext):
-    code = message.text.upper()
-    sql.execute("SELECT amount, uses FROM giftcodes WHERE code = ?", (code,))
-    res = sql.fetchone()
-    if res and res[1] > 0:
-        sql.execute("UPDATE giftcodes SET uses = uses - 1 WHERE code = ?", (code,))
-        sql.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (res[0], message.from_user.id))
-        db.commit()
-        await message.answer(f"🎉 Redeemed {res[0]} Rs!")
-    else: await message.answer("❌ Invalid/Expired!")
-    await state.finish()
+        await bot.send_message(u_id, f"👥 <b>Refer & Earn 3 Rs</b>\n\nYour Link: https://t.me/{me.username}?start={u_id}")
 
 if __name__ == '__main__':
     threading.Thread(target=run_flask, daemon=True).start()
