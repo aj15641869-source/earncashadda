@@ -11,7 +11,7 @@ from aiogram.dispatcher import FSMContext
 from aiogram.dispatcher.filters.state import State, StatesGroup
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
 
-# --- RENDER WEB APP HOSTING ---
+# --- RENDER WEB APP ---
 app = Flask(__name__)
 
 HTML_CONTENT = """
@@ -32,14 +32,18 @@ HTML_CONTENT = """
 </head>
 <body>
     <div class="scanner"><img src="https://cdn-icons-png.flaticon.com/512/2566/2566210.png" style="width:100%; filter:invert(1); opacity:0.7;"><div class="scan-line"></div></div>
-    <h3 style="color:#4dabf7;">HARDWARE ANALYSIS...</h3>
+    <h3 style="color:#4dabf7;">VERIFYING...</h3>
     <div class="bar"><div class="fill" id="f"></div></div>
     <script>
         let tg = window.Telegram.WebApp; tg.expand();
         let p = 0;
         let it = setInterval(() => {
             p += 5; document.getElementById('f').style.width = p + "%";
-            if(p >= 100) { clearInterval(it); tg.sendData("verified"); setTimeout(() => tg.close(), 500); }
+            if(p >= 100) { 
+                clearInterval(it); 
+                tg.sendData("verified"); // Bot ko signal bhej raha hai
+                setTimeout(() => tg.close(), 500); 
+            }
         }, 80);
     </script>
 </body>
@@ -55,7 +59,7 @@ def run_flask():
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port)
 
-# --- CONFIG ---
+# --- BOT CONFIG ---
 TOKEN = "7891440763:AAEcQNKFr7DIzAufHeKDZ1H9UJbQ4FsAl2A"
 ADMIN_ID = 5766303284 
 RENDER_URL = "https://earncashadda.onrender.com" 
@@ -68,12 +72,15 @@ class AdminStates(StatesGroup):
     add_bal_id = State()
     add_bal_amt = State()
     withdraw_upi = State()
-    change_min = State()
+    redeem_code = State()
+    gift_code = State()
+    gift_amt = State()
 
 db = sqlite3.connect("cashadda.db")
 sql = db.cursor()
 sql.execute("CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, balance REAL DEFAULT 0, ip TEXT, is_verified INTEGER DEFAULT 0, referred_by INTEGER, ref_count INTEGER DEFAULT 0, is_claimed INTEGER DEFAULT 0)")
 sql.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
+sql.execute("CREATE TABLE IF NOT EXISTS giftcodes (code TEXT PRIMARY KEY, amount REAL, uses INTEGER)")
 sql.execute("INSERT OR IGNORE INTO settings VALUES ('min_withdraw', '10')")
 db.commit()
 
@@ -84,19 +91,31 @@ async def get_ip():
                 d = await r.json(); return d['ip']
     except: return "127.0.0.1"
 
+# Dashboard Function (Baar baar use hoga)
+async def send_main_menu(chat_id):
+    markup = InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        InlineKeyboardButton("💰 Balance", callback_data="bal"),
+        InlineKeyboardButton("👥 Refer", callback_data="ref"),
+        InlineKeyboardButton("📤 Withdraw", callback_data="withdraw_req"),
+        InlineKeyboardButton("🏆 Leaderboard", callback_data="leader"),
+        InlineKeyboardButton("🎁 Gift Code", callback_data="redeem")
+    )
+    await bot.send_message(chat_id, "👋 <b>Welcome To CashAdda!</b>\nYour account is fully verified ✅", reply_markup=markup)
+
 # --- START ---
 @dp.message_handler(commands=['start'])
 async def start(message: types.Message):
     u_id = message.from_user.id
     u_ip = await get_ip()
 
-    # One Device Security
-    sql.execute("SELECT user_id FROM users WHERE ip = ? AND user_id != ?", (u_ip, u_id))
-    if sql.fetchone():
-        return await message.answer("❌ <b>Security Alert!</b>\nYou already have an account on this device.")
-
     sql.execute("SELECT is_verified FROM users WHERE user_id = ?", (u_id,))
     res = sql.fetchone()
+
+    # Pehle IP Check
+    sql.execute("SELECT user_id FROM users WHERE ip = ? AND user_id != ?", (u_ip, u_id))
+    if sql.fetchone():
+        return await message.answer("❌ One Device = One Account Policy!")
 
     if not res or res[0] == 0:
         if not res:
@@ -106,106 +125,66 @@ async def start(message: types.Message):
             db.commit()
         
         markup = InlineKeyboardMarkup().add(InlineKeyboardButton("🛡️ Verify Device", web_app=types.WebAppInfo(url=f"{RENDER_URL}/verify")))
-        return await message.answer("🔒 <b>Hardware Verification</b>\nEstablish a secure connection to start.", reply_markup=markup)
+        return await message.answer("🔒 <b>Security Verification</b>\nClick below to verify and unlock the dashboard.", reply_markup=markup)
 
-    # Main Dashboard
-    markup = InlineKeyboardMarkup(row_width=2)
-    markup.add(
-        InlineKeyboardButton("💰 Balance", callback_data="bal"),
-        InlineKeyboardButton("👥 Refer", callback_data="ref"),
-        InlineKeyboardButton("📤 Withdraw", callback_data="withdraw_init"),
-        InlineKeyboardButton("🏆 Leaderboard", callback_data="leader")
-    )
-    await message.answer("👋 <b>CashAdda Dashboard</b>\n\n🎁 Top 3 get 50 Rs reward!", reply_markup=markup)
+    await send_main_menu(u_id)
 
-# --- VERIFY SUCCESS ---
+# --- VERIFY SUCCESS (Yahan Fix kiya hai) ---
 @dp.message_handler(content_types=['web_app_data'])
-async def verified(message: types.Message):
+async def verified_data(message: types.Message):
     if message.web_app_data.data == "verified":
         u_id = message.from_user.id
         sql.execute("SELECT is_claimed, referred_by FROM users WHERE user_id = ?", (u_id,))
         res = sql.fetchone()
+        
+        # 3 Rs Joining Bonus + Mark Verified
         if res and res[0] == 0:
             sql.execute("UPDATE users SET balance = balance + 3, is_verified = 1, is_claimed = 1 WHERE user_id = ?", (u_id,))
-            if res[1]:
+            if res[1]: # Referrer Bonus
                 sql.execute("UPDATE users SET balance = balance + 3, ref_count = ref_count + 1 WHERE user_id = ?", (res[1],))
                 try: await bot.send_message(res[1], "💰 <b>Referral Success!</b> +3 Rs added.")
                 except: pass
             db.commit()
-        await message.answer("✅ <b>Verified!</b> 3 Rs Bonus added.\nType /start to open menu.")
+        
+        await message.answer("✅ <b>Verified Successfully!</b>\n3 Rs Bonus Added to your balance.")
+        await send_main_menu(u_id) # Seedha menu bhej diya
 
-# --- ADMIN PANEL ---
+# --- ADMIN & OTHERS ---
 @dp.message_handler(commands=['admin'])
 async def admin(message: types.Message):
     if message.from_user.id == ADMIN_ID:
-        markup = InlineKeyboardMarkup(row_width=1)
-        markup.add(
+        markup = InlineKeyboardMarkup().add(
             InlineKeyboardButton("📢 Broadcast", callback_data="bc"),
-            InlineKeyboardButton("➕ Add Balance", callback_data="add_bal"),
-            InlineKeyboardButton("⚙️ Change Min Withdraw", callback_data="set_min")
+            InlineKeyboardButton("🎁 Make Giftcode", callback_data="mk_gift")
         )
-        await message.answer("👨‍✈️ <b>Admin Controls</b>", reply_markup=markup)
+        await message.answer("👨‍✈️ Admin Panel", reply_markup=markup)
 
-@dp.callback_query_handler(lambda c: c.data == "set_min")
-async def set_min_init(c: types.CallbackQuery):
-    await AdminStates.change_min.set()
-    await bot.send_message(c.from_user.id, "Enter New Minimum Withdraw Limit (Rs):")
-
-@dp.message_handler(state=AdminStates.change_min)
-async def update_min(message: types.Message, state: FSMContext):
-    if message.text.isdigit():
-        sql.execute("UPDATE settings SET value = ? WHERE key = 'min_withdraw'", (message.text,))
-        db.commit()
-        await message.answer(f"✅ Minimum Withdraw updated to {message.text} Rs")
-    await state.finish()
-
-# --- WITHDRAWAL LOGIC ---
-@dp.callback_query_handler(lambda c: c.data == "withdraw_init")
-async def withdraw_start(c: types.CallbackQuery):
-    sql.execute("SELECT value FROM settings WHERE key = 'min_withdraw'")
-    min_val = int(sql.fetchone()[0])
-    sql.execute("SELECT balance FROM users WHERE user_id = ?", (c.from_user.id,))
-    bal = sql.fetchone()[0]
-    if bal < min_val:
-        return await bot.answer_callback_query(c.id, f"❌ Minimum {min_val} Rs needed!", show_alert=True)
-    await AdminStates.withdraw_upi.set()
-    await bot.send_message(c.from_user.id, "📩 <b>Enter UPI ID:</b>")
-
-@dp.message_handler(state=AdminStates.withdraw_upi)
-async def process_withdraw(message: types.Message, state: FSMContext):
-    upi = message.text
-    if "@" not in upi: return await message.answer("❌ Invalid UPI!")
-    sql.execute("SELECT balance FROM users WHERE user_id = ?", (message.from_user.id,))
-    amt = sql.fetchone()[0]
-    
-    markup = InlineKeyboardMarkup().add(InlineKeyboardButton("✅ Mark Paid", callback_data=f"pay_{message.from_user.id}_{amt}"))
-    await bot.send_message(ADMIN_ID, f"📤 <b>Withdraw Request!</b>\nID: {message.from_user.id}\nAmt: {amt} Rs\nUPI: {upi}", reply_markup=markup)
-    
-    sql.execute("UPDATE users SET balance = 0 WHERE user_id = ?", (message.from_user.id,))
-    db.commit()
-    await message.answer("✅ Request Sent! Wait for approval."); await state.finish()
-
-@dp.callback_query_handler(lambda c: c.data.startswith("pay_"))
-async def mark_paid(c: types.CallbackQuery):
-    _, uid, amt = c.data.split("_")
-    try:
-        await bot.send_message(uid, f"🎊 <b>Payment Sent!</b>\nYour withdrawal of {amt} Rs has been processed.")
-        await bot.edit_message_text(f"✅ <b>Paid</b>\nID: {uid}\nAmt: {amt} Rs", ADMIN_ID, c.message.message_id)
-    except: pass
-
-# --- OTHER CALLBACKS ---
-@dp.callback_query_handler(lambda c: True)
-async def calls(c: types.CallbackQuery):
+@dp.callback_query_handler(lambda c: True, state="*")
+async def calls(c: types.CallbackQuery, state: FSMContext):
     u_id = c.from_user.id
     if c.data == "bal":
         sql.execute("SELECT balance FROM users WHERE user_id = ?", (u_id,))
         await bot.send_message(u_id, f"💳 <b>Balance:</b> {sql.fetchone()[0]} Rs")
-    elif c.data == "leader":
-        sql.execute("SELECT user_id, ref_count FROM users ORDER BY ref_count DESC LIMIT 3")
-        top = sql.fetchall()
-        text = "🏆 <b>Leaderboard</b>\nTop 3 winners get 50 Rs!\n\n"
-        for i, u in enumerate(top, 1): text += f"{i}. ID: {u[0]} | {u[1]} Refers\n"
-        await bot.send_message(u_id, text)
+    elif c.data == "ref":
+        me = await bot.get_me()
+        await bot.send_message(u_id, f"👥 <b>Refer Link:</b> https://t.me/{me.username}?start={u_id}")
+    elif c.data == "redeem":
+        await AdminStates.redeem_code.set()
+        await bot.send_message(u_id, "📩 Enter Gift Code:")
+
+# Giftcode Redeem Handler
+@dp.message_handler(state=AdminStates.redeem_code)
+async def gift_redeem(message: types.Message, state: FSMContext):
+    code = message.text.upper()
+    sql.execute("SELECT amount, uses FROM giftcodes WHERE code = ?", (code,))
+    res = sql.fetchone()
+    if res and res[1] > 0:
+        sql.execute("UPDATE giftcodes SET uses = uses - 1 WHERE code = ?", (code,))
+        sql.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (res[0], message.from_user.id))
+        db.commit()
+        await message.answer(f"🎉 Redeemed {res[0]} Rs!")
+    else: await message.answer("❌ Invalid/Expired!")
+    await state.finish()
 
 if __name__ == '__main__':
     threading.Thread(target=run_flask, daemon=True).start()
