@@ -22,6 +22,7 @@ def run_flask():
 # --- CONFIG ---
 TOKEN = "7891440763:AAEcQNKFr7DIzAufHeKDZ1H9UJbQ4FsAl2A"
 ADMIN_ID = 5766303284 
+# Sahi GitHub Pages Link
 SECURITY_WEBAPP_URL = "https://aj15641869-source.github.io/earncashadda/" 
 
 REFER_BONUS = 3  
@@ -39,6 +40,14 @@ bot = Bot(token=TOKEN, parse_mode="HTML")
 storage = MemoryStorage()
 dp = Dispatcher(bot, storage=storage)
 
+# --- STATES ---
+class WithdrawState(StatesGroup):
+    waiting_for_upi = State()
+
+class AdminState(StatesGroup):
+    waiting_for_search = State()
+    waiting_for_new_balance = State()
+
 # --- DATABASE SETUP ---
 db = sqlite3.connect("cashadda.db")
 sql = db.cursor()
@@ -48,7 +57,6 @@ sql.execute("""CREATE TABLE IF NOT EXISTS users (
     referred_by INTEGER,
     ref_count INTEGER DEFAULT 0,
     is_bonus_claimed INTEGER DEFAULT 0,
-    ip_address TEXT,
     is_blocked INTEGER DEFAULT 0,
     last_daily_bonus INTEGER DEFAULT 0
 )""")
@@ -62,6 +70,7 @@ async def is_subscribed(user_id):
         except: return False
     return True
 
+# --- MAIN START COMMAND ---
 @dp.message_handler(commands=['start'])
 async def start(message: types.Message):
     user_id = message.from_user.id
@@ -76,36 +85,45 @@ async def start(message: types.Message):
     user = sql.fetchone()
     
     if not user:
-        # Save user first
+        # Save user and show High-Level Verification
         args = message.get_args()
         referrer = int(args) if args.isdigit() else None
         sql.execute("INSERT INTO users (user_id, referred_by, balance) VALUES (?, ?, ?)", (user_id, referrer, 0))
         db.commit()
 
-        # Show Fingerprint Verification Only Once
         markup = InlineKeyboardMarkup()
-        markup.add(InlineKeyboardButton(text="🛡️ Verify Yourself", web_app=types.WebAppInfo(url=SECURITY_WEBAPP_URL)))
-        return await message.answer("🔒 <b>Security Verification</b>\nClick below to verify your device.", reply_markup=markup)
+        markup.add(InlineKeyboardButton(
+            text="🛡️ Verify Device & Start", 
+            web_app=types.WebAppInfo(url=SECURITY_WEBAPP_URL)
+        ))
+        
+        return await message.answer(
+            "🔒 <b>Security Verification Required</b>\n\n"
+            "Welcome! To prevent fake accounts, please complete the device scan below.",
+            reply_markup=markup
+        )
 
+    # Membership Check
     if not await is_subscribed(user_id):
         markup = InlineKeyboardMarkup(row_width=1)
         for name, link in CHANNEL_LINKS:
             markup.add(InlineKeyboardButton(name, url=link))
         markup.add(InlineKeyboardButton("✅ Joined - Verify", callback_data="verify"))
-        return await message.answer("👋 Join both channels to get 3 Rs bonus:", reply_markup=markup)
+        return await message.answer("👋 <b>Wait!</b> Join our channels to unlock your 3 Rs bonus:", reply_markup=markup)
 
-    # Bonus Credit
+    # Claim Bonus
     sql.execute("SELECT is_bonus_claimed, referred_by FROM users WHERE user_id = ?", (user_id,))
     res = sql.fetchone()
     if res and res[0] == 0: 
         sql.execute("UPDATE users SET balance = balance + ?, is_bonus_claimed = 1 WHERE user_id = ?", (JOINING_BONUS, user_id))
         if res[1]:
             sql.execute("UPDATE users SET balance = balance + ?, ref_count = ref_count + 1 WHERE user_id = ?", (REFER_BONUS, res[1]))
-            try: await bot.send_message(res[1], f"💰 <b>Referral Success!</b> +{REFER_BONUS} Rs")
+            try: await bot.send_message(res[1], f"💰 <b>Referral Success!</b> You earned {REFER_BONUS} Rs.")
             except: pass
         db.commit()
-        await message.answer(f"🎉 <b>Bonus Added!</b>")
+        await message.answer(f"🎉 <b>{JOINING_BONUS} Rs Bonus Added!</b>")
 
+    # Main Menu
     markup = InlineKeyboardMarkup(row_width=2)
     markup.add(
         InlineKeyboardButton("💰 Balance", callback_data="balance"),
@@ -114,38 +132,55 @@ async def start(message: types.Message):
         InlineKeyboardButton("📤 Withdraw", callback_data="withdraw"),
         InlineKeyboardButton("📊 Stats", callback_data="stats")
     )
-    await message.answer(f"👋 <b>Main Menu</b>", reply_markup=markup)
+    await message.answer(f"👋 <b>Welcome back, {message.from_user.first_name}!</b>\nManage your earnings below:", reply_markup=markup)
 
-# --- DAILY BONUS ---
-@dp.callback_query_handler(lambda c: c.data == "daily_bonus")
-async def daily_bonus(c: types.CallbackQuery):
+# --- CALLBACKS ---
+@dp.callback_query_handler(lambda c: True, state="*")
+async def process_callbacks(c: types.CallbackQuery, state: FSMContext):
     user_id = c.from_user.id
-    sql.execute("SELECT last_daily_bonus FROM users WHERE user_id = ?", (user_id,))
-    last_time = sql.fetchone()[0]
-    if int(time.time()) - last_time < 86400:
-        return await bot.answer_callback_query(c.id, "❌ Come back tomorrow!", show_alert=True)
-    sql.execute("UPDATE users SET balance = balance + ?, last_daily_bonus = ? WHERE user_id = ?", (DAILY_BONUS_AMT, int(time.time()), user_id))
-    db.commit()
-    await bot.answer_callback_query(c.id, f"🎁 {DAILY_BONUS_AMT} Rs Added!", show_alert=True)
-
-# --- STATS ---
-@dp.callback_query_handler(lambda c: c.data == "stats")
-async def stats_call(c: types.CallbackQuery):
-    sql.execute("SELECT COUNT(*) FROM users")
-    total = sql.fetchone()[0]
-    await bot.send_message(c.from_user.id, f"📊 <b>Total Users:</b> {total}\n🚀 Bot is 100% Secure!")
-
-# --- BALANCE & REFER ---
-@dp.callback_query_handler(lambda c: c.data in ["balance", "refer", "verify"])
-async def other_calls(c: types.CallbackQuery):
+    
     if c.data == "balance":
-        sql.execute("SELECT balance FROM users WHERE user_id = ?", (c.from_user.id,))
-        await bot.send_message(c.from_user.id, f"💳 <b>Balance:</b> {sql.fetchone()[0]} Rs")
+        sql.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,))
+        await bot.send_message(user_id, f"💳 <b>Your Balance:</b> {sql.fetchone()[0]} Rs")
+    
     elif c.data == "refer":
         me = await bot.get_me()
-        await bot.send_message(c.from_user.id, f"🔗 <b>Link:</b> https://t.me/{me.username}?start={c.from_user.id}")
+        await bot.send_message(user_id, f"👥 <b>Earn {REFER_BONUS} Rs Per Refer</b>\n\n🔗 Your Link: https://t.me/{me.username}?start={user_id}")
+    
+    elif c.data == "daily_bonus":
+        sql.execute("SELECT last_daily_bonus FROM users WHERE user_id = ?", (user_id,))
+        last_time = sql.fetchone()[0]
+        if int(time.time()) - last_time < 86400:
+            return await bot.answer_callback_query(c.id, "❌ Come back tomorrow!", show_alert=True)
+        sql.execute("UPDATE users SET balance = balance + ?, last_daily_bonus = ? WHERE user_id = ?", (DAILY_BONUS_AMT, int(time.time()), user_id))
+        db.commit()
+        await bot.answer_callback_query(c.id, f"🎁 {DAILY_BONUS_AMT} Rs Added!", show_alert=True)
+
+    elif c.data == "stats":
+        sql.execute("SELECT COUNT(*), SUM(balance) FROM users")
+        res = sql.fetchone()
+        await bot.send_message(user_id, f"📊 <b>Bot Stats</b>\nTotal Users: {res[0]}\nTotal Distributed: {res[1] if res[1] else 0} Rs")
+
     elif c.data == "verify":
         await start(c.message)
+
+    elif c.data == "withdraw":
+        sql.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,))
+        if sql.fetchone()[0] < MIN_WITHDRAW:
+            return await bot.answer_callback_query(c.id, f"❌ Min {MIN_WITHDRAW} Rs needed!", show_alert=True)
+        await WithdrawState.waiting_for_upi.set()
+        await bot.send_message(user_id, "📩 <b>Enter UPI ID:</b>")
+
+# --- WITHDRAW HANDLER ---
+@dp.message_handler(state=WithdrawState.waiting_for_upi)
+async def process_withdraw(message: types.Message, state: FSMContext):
+    if "@" not in message.text: return await message.answer("❌ Invalid UPI!")
+    sql.execute("SELECT balance FROM users WHERE user_id = ?", (message.from_user.id,))
+    amt = sql.fetchone()[0]
+    await bot.send_message(ADMIN_ID, f"💰 <b>Withdrawal!</b>\nID: {message.from_user.id}\nAmt: {amt} Rs\nUPI: {message.text}")
+    sql.execute("UPDATE users SET balance = 0 WHERE user_id = ?", (message.from_user.id,))
+    db.commit()
+    await message.answer("✅ Request Sent!"); await state.finish()
 
 if __name__ == '__main__':
     threading.Thread(target=run_flask).start()
